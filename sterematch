@@ -1,0 +1,239 @@
+/* 
+ *  stereo_match.cpp 
+ *  calibration 
+ * 
+ *  Created by wangjianhang   17/4/14/15:20
+ *   All rights reserved. 
+ * 
+ */  
+//opencv2库  
+#include "opencv2/calib3d/calib3d.hpp"  
+#include "opencv2/imgproc/imgproc.hpp"  
+#include "opencv2/highgui/highgui.hpp"  
+#include "opencv2/contrib/contrib.hpp"  
+ 
+// PCL 库
+#include "pcl-1.7/pcl/io/pcd_io.h"
+#include "pcl-1.7/pcl/point_types.h"
+#include "pcl-1.7/pcl/visualization/cloud_viewer.h"
+
+#include <stdio.h>  
+#include <iostream>  
+ 
+using namespace cv;  
+using namespace std;
+
+static void print_help()  
+{  
+    printf("\nDemo stereo matching converting L and R images into disparity and point clouds\n");  
+    printf("\nUsage: stereo_match <left_image> <right_image> ]\n");
+}  
+
+int main(int argc, char** argv)  
+{  
+    if(argc < 3)  
+    {  
+        print_help();  
+        return 0;  
+    }  
+    const char* img1_filename =0;  
+    const char* img2_filename = 0;
+  
+    int STEREO_SGBM =1;
+    int alg = STEREO_SGBM;  
+    bool no_display = false;  
+    float scale = 1.f;  
+    
+    StereoSGBM sgbm;  
+ 
+    //读取参数
+    for( int i = 1; i < argc; i++ )  
+    { 
+        //读取双目图像位置
+        if( argv[i][0] == '.' )  
+        {  
+            if( !img1_filename )  
+                img1_filename = argv[i];  
+            else  
+                img2_filename = argv[i];  
+        } 
+        else  
+        {  
+            printf("Command-line parameter error: unknown option %s\n", argv[i]);  
+            return -1;  
+        }  
+    }  
+  
+    if( !img1_filename || !img2_filename )  
+    {  
+        printf("Command-line parameter error: both left and right images must be specified\n");  
+        return -1;  
+    }  
+    
+    Mat img1 = imread(img1_filename, -1);  //灰度图
+    Mat img2 = imread(img2_filename, -1);  //灰度图
+  
+    if( scale != 1.f )  
+    {  
+        Mat temp1, temp2;  
+        int method = scale < 1 ? INTER_AREA : INTER_CUBIC;  
+        resize(img1, temp1, Size(), scale, scale, method);  
+        img1 = temp1;  
+        resize(img2, temp2, Size(), scale, scale, method);  
+        img2 = temp2;  
+    }  
+
+    int cn = 1; //number of channels
+    int SADWindowSize = 5; //Matched block size. It must be an odd number >=1 . Normally, it should be somewhere in the 3..11 range.
+    int numberOfDisparities = 256; //Maximum disparity minus minimum disparity, must be n*16
+    sgbm.minDisparity = 0; //Minimum possible disparity value
+    sgbm.uniquenessRatio = 10;
+    sgbm.speckleWindowSize = 100;
+    sgbm.preFilterCap = 63; //Truncation value for the prefiltered image pixels
+    sgbm.SADWindowSize = SADWindowSize > 0 ? SADWindowSize : 3;
+    sgbm.P1 = 4*cn*sgbm.SADWindowSize*sgbm.SADWindowSize; //controlling the disparity smoothness. P2 > P1
+    sgbm.P2 = 32*cn*sgbm.SADWindowSize*sgbm.SADWindowSize; //controlling the disparity smoothness.The larger the values are, the smoother the disparity is
+    sgbm.numberOfDisparities = numberOfDisparities;
+    sgbm.speckleRange = 32; // devided by 16, 1 or 2 is good enough
+    sgbm.disp12MaxDiff = 1;
+  
+    Mat disp, disp8;  
+    //Mat img1p, img2p, dispp;  
+    //copyMakeBorder(img1, img1p, 0, 0, numberOfDisparities, 0, IPL_BORDER_REPLICATE);  
+    //copyMakeBorder(img2, img2p, 0, 0, numberOfDisparities, 0, IPL_BORDER_REPLICATE);  
+    int64 t = getTickCount();  
+    sgbm(img1, img2, disp);  
+   
+    //实际视差为sgbm计算的disp/16,由原来的CV_16s，转换为CV_32f
+    disp.convertTo(disp, CV_32F, 1.0/16);
+    
+    t = getTickCount() - t;  
+    printf("Time elapsed: %fms\n", t*1000/getTickFrequency());  
+
+    //计算深度z=bf/d
+       //生成点云
+    
+    // 定义点云类型
+    typedef pcl::PointXYZRGB PointT;
+    typedef pcl::PointCloud<PointT> PointCloud; 
+
+    // 相机内参 //ZED@1280*720
+//     const float baseline = 120; //mm
+//     const double focus = 700.8;  //像素
+//     const double factor = 1;
+//     const double cx = 600.83;
+//     const double cxr = 600.83;
+//     const double cy = 390.825;
+//     const double cyr = 390.825;
+    
+       // 相机内参//KITTI seq00
+    const float baseline = 537.17; //mm
+    const double focus = 718.85;  //像素
+    const double factor = 1;
+    const double cx = 607.1928;
+    const double cxr = 607.1928;
+    const double cy = 185.2157;
+    const double cyr = 185.2157;
+    
+
+    // 点云变量
+    // 使用智能指针，创建一个空点云。这种指针用完会自动释放。
+    PointCloud::Ptr cloud ( new PointCloud );
+    cloud->points.clear();
+    Mat depth;
+    disp.copyTo(depth);    
+    for(int i=0; i<disp.rows; i++)
+    {
+        float* data = disp.ptr<float>(i);   //CV_32f
+	float* data_out = depth.ptr<float>(i);  //CV_32f
+	for(int j=0; j<disp.cols; j++)
+        {
+	    if(data[j]<=0)  
+	    {
+	         continue;
+		 data_out[j] = 0;
+	    }
+	    data_out[j] =   focus*baseline/data[j];;  //mm单位
+	    PointT p;
+	    // 计算这个点的空间坐标的
+ 	    float d1 = data_out[j];
+	    if(d1>100000)
+	      continue;  
+ 	    p.z = d1/1000;  
+	    p.x = (j - cx) * p.z/ focus;
+  	    p.y = (i - cy) * p.z/ focus;	
+	    
+	    // 从rgb图像中获取它的颜色
+            // rgb是三通道的BGR格式图，所以按下面的顺序获取颜色
+            p.b = img1.ptr<uchar>(i)[j*3];
+            p.g = img1.ptr<uchar>(i)[j*3+1];
+            p.r = img1.ptr<uchar>(i)[j*3+2];
+	    
+	    // 把p加入到点云中
+	    cloud->points.push_back( p );
+	}
+    }
+    //cout << depth <<endl;
+    //disp = dispp.colRange(numberOfDisparities, img1p.cols);  
+    disp.convertTo(disp8, CV_8U);   //disp为了显示归一化为disp8
+	
+    Mat depth8;
+    depth8 = depth.clone();
+    depth8 = depth8/100;   //分米单位
+    depth8.convertTo(depth8, CV_8U);   //为了显示depth归一化
+//         for(int i=0; i<depth.rows; i++)
+//         {
+// 	float* d = depth.ptr<float>(i);  //CV_32f
+// 	for(int j=0; j<depth.cols; j++)
+//         {
+// 	    if(d[j]==0)  continue;
+// 	    // d 存在值，则向点云增加一个点
+// // 	    PointT p;
+// // 	    // 计算这个点的空间坐标的
+// //  	    float d1 = d[j];
+// // 	    if(d1>100000)
+// // 	      continue;
+// //   
+// //  	    p.z = d1/1000;  
+// // 	    p.x = (j - cx) * p.z/ focus;
+// //   	    p.y = (i - cy) * p.z/ focus;		
+// // 	    // 把p加入到点云中
+// // 	    cloud->points.push_back( p );
+// 	}
+//     }    
+    printf("depth_col = %d ",depth8.cols);
+    printf("depth_row = %d ",depth8.rows);
+    printf("depth.channels = %d ", depth8.channels());
+    // 设置并保存点云
+    cloud->height = 1;
+    cloud->width = cloud->points.size();
+    cout<<"point cloud size = "<<cloud->points.size()<<endl;
+    cloud->is_dense = false;
+    pcl::io::savePCDFile( "./pointcloud.pcd", *cloud );
+    //显示点云
+    pcl::visualization::CloudViewer viewer("Cloud Viewer");
+    viewer.showCloud(cloud);
+    // 清除数据并退出
+    cloud->points.clear();
+    cout<<"Point cloud saved."<<endl;
+    if( !no_display )  
+    {  
+        namedWindow("left", 1);  
+        imshow("left", img1);  
+        namedWindow("right", 1);  
+        imshow("right", img2);  
+        namedWindow("disparity", 0);  
+        imshow("disparity", disp8);
+        namedWindow("depth",0);
+        imshow("depth", depth8); 
+        printf("press any key to continue...");  
+        fflush(stdout);  
+        waitKey();  
+        printf("\n");  
+    } 
+    imwrite("./disparity.png", disp); 
+    imwrite("./disparity8.png", disp8); 
+    imwrite("./depth8.png",depth8); 
+    imwrite("./depth.png",depth);
+    return 0;  
+}  
